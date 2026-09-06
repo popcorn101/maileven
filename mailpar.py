@@ -1,9 +1,6 @@
 import streamlit as st
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
-from google.oauth2.credentials import Credentials
-from google.auth.transport.requests import Request
-import os
 import base64
 from pathlib import Path
 from analyzer import analyze_emails_batch, add_to_calendar
@@ -60,7 +57,6 @@ st.markdown("""
         margin-top: 4px;
     }
 
-    /* Standard Raw Inbox Row */
     .inbox-row {
         background: #ffffff;
         border: 1px solid #e2e8f0;
@@ -70,7 +66,6 @@ st.markdown("""
         box-shadow: 0 1px 2px rgba(15, 23, 42, 0.02);
     }
 
-    /* AI Analysis Card */
     .email-card {
         background: #ffffff;
         border: 1.5px solid #e2e8f0;
@@ -112,10 +107,9 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# 2. Hybrid OAuth Flow & Gmail Helpers
+# 2. Multi-Tenant OAuth Flow (Isolated In-Memory Session State)
 # -----------------------------------------------------------------------------
 CLIENT_SECRETS_FILE = Path(__file__).parent / "client_secret.json"
-TOKEN_FILE = Path(__file__).parent / "token.json"
 SCOPES = [
     'https://www.googleapis.com/auth/gmail.readonly',
     'https://www.googleapis.com/auth/calendar.events'
@@ -134,10 +128,10 @@ def get_oauth_flow():
     elif CLIENT_SECRETS_FILE.exists():
         return Flow.from_client_secrets_file(str(CLIENT_SECRETS_FILE), scopes=SCOPES, redirect_uri=REDIRECT_URI)
     else:
-        st.error("Missing Google OAuth credentials.")
+        st.error("Missing Google OAuth configuration in st.secrets or client_secret.json.")
         st.stop()
 
-# Session State Initialization
+# Session State Initialization (Isolated Per Browser Session)
 if "raw_inbox" not in st.session_state:
     st.session_state.raw_inbox = []
 if "scan_results" not in st.session_state:
@@ -146,28 +140,11 @@ if "synced_events" not in st.session_state:
     st.session_state.synced_events = set()
 if "credentials" not in st.session_state:
     st.session_state.credentials = None
-
-# Auto-login via persisted token.json
-if not st.session_state.credentials and os.path.exists(TOKEN_FILE):
-    try:
-        creds = Credentials.from_authorized_user_file(str(TOKEN_FILE), SCOPES)
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-            with open(TOKEN_FILE, 'w') as tf:
-                tf.write(creds.to_json())
-        if creds and creds.valid:
-            st.session_state.credentials = creds
-    except Exception:
-        if os.path.exists(TOKEN_FILE):
-            os.remove(TOKEN_FILE)
+if "code_verifier" not in st.session_state:
+    st.session_state.code_verifier = None
 
 def logout_user():
-    if os.path.exists(TOKEN_FILE):
-        os.remove(TOKEN_FILE)
-    st.session_state.credentials = None
-    st.session_state.raw_inbox = []
-    st.session_state.scan_results = []
-    st.session_state.synced_events = set()
+    st.session_state.clear()
     st.rerun()
 
 # OAuth Callback Handler
@@ -175,33 +152,26 @@ query_params = st.query_params
 if "code" in query_params and not st.session_state.credentials:
     code = query_params["code"]
     saved_verifier = st.session_state.get("code_verifier")
-    if not saved_verifier and os.path.exists("verifier.txt"):
-        try:
-            with open("verifier.txt", "r") as vf:
-                saved_verifier = vf.read().strip()
-        except Exception:
-            pass
 
     if not saved_verifier:
-        st.error("Authentication expired. Please restart.")
+        st.error("Authentication session expired. Please sign in again.")
+        st.query_params.clear()
         st.stop()
 
     flow = get_oauth_flow()
-    flow.fetch_token(code=code, code_verifier=saved_verifier)
-    creds = flow.credentials
-
     try:
-        with open(TOKEN_FILE, 'w') as tf:
-            tf.write(creds.to_json())
-    except Exception:
-        pass
-
-    st.session_state.credentials = creds
-    st.query_params.clear()
-    st.rerun()
+        flow.fetch_token(code=code, code_verifier=saved_verifier)
+        st.session_state.credentials = flow.credentials
+    except Exception as e:
+        st.error(f"Failed to authenticate: {e}")
+        st.stop()
+    finally:
+        st.session_state.code_verifier = None
+        st.query_params.clear()
+        st.rerun()
 
 def decode_body(payload):
-    """Recursively walks message MIME parts to extract the readable plain text or HTML body."""
+    """Recursively walks message MIME parts to extract plain text or HTML."""
     body_text = ""
     if 'parts' in payload:
         for part in payload['parts']:
@@ -222,7 +192,7 @@ def decode_body(payload):
     return body_text
 
 def fetch_recent_emails(gmail_service, max_results=15):
-    """Fetches full email details including the decoded body text."""
+    """Fetches full email details including decoded body text."""
     results = gmail_service.users().messages().list(
         userId='me',
         maxResults=max_results
@@ -250,7 +220,7 @@ def fetch_recent_emails(gmail_service, max_results=15):
     return fetched
 
 # -----------------------------------------------------------------------------
-# 3. Gmail-Style Email Reader Modal
+# 3. Email Reader Modal
 # -----------------------------------------------------------------------------
 @st.dialog("Email Details", width="large")
 def show_email_modal(msg):
@@ -263,7 +233,6 @@ def show_email_modal(msg):
     
     st.divider()
     
-    # Render body safely in an insulated scrollable frame
     body = msg.get('body', msg.get('snippet', ''))
     if "<html" in body.lower() or "<div" in body.lower() or "<p" in body.lower():
         st.components.v1.html(
@@ -291,12 +260,7 @@ if not st.session_state.credentials:
 
         flow = get_oauth_flow()
         auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline')
-        st.session_state["code_verifier"] = flow.code_verifier
-        try:
-            with open("verifier.txt", "w") as vf:
-                vf.write(flow.code_verifier)
-        except Exception:
-            pass
+        st.session_state.code_verifier = flow.code_verifier
 
         st.link_button("Sign in with Google Workspace →", auth_url, type="primary", use_container_width=True)
     st.stop()
@@ -362,12 +326,11 @@ if nav_selection == "📬 Inbox":
         </div>
         """, unsafe_allow_html=True)
         
-        # Click action button right below the row to read full mail
         if st.button("📖 Read Full Email", key=f"view_raw_{msg['id']}"):
             show_email_modal(msg)
 
 
-# --- VIEW 2: AI TRIAGE (USES GROQ) ---
+# --- VIEW 2: AI TRIAGE (GROQ POWERED) ---
 elif nav_selection == "⚡ AI Triage":
     with st.container():
         cfg_c1, cfg_c2 = st.columns([3.5, 1])
@@ -431,7 +394,6 @@ elif nav_selection == "⚡ AI Triage":
             status_box.update(label=f"Done — Identified {len(processed)} relevant threads", state="complete", expanded=False)
             st.rerun()
 
-    # Triage Results Feed
     if st.session_state.scan_results:
         st.markdown(f"<div style='font-size:0.85rem; font-weight:700; color:#475569; margin: 20px 0 10px 0;'>FILTERED THREADS ({len(st.session_state.scan_results)})</div>", unsafe_allow_html=True)
 
