@@ -31,7 +31,6 @@ st.markdown("""
     footer { display: none !important; }
     .block-container { padding-top: 1.5rem !important; max-width: 1120px !important; }
 
-    /* Top Brand Bar */
     .brand-logo {
         font-size: 1.25rem;
         font-weight: 800;
@@ -39,7 +38,6 @@ st.markdown("""
         letter-spacing: -0.02em;
     }
 
-    /* Metric Boxes */
     .stat-card {
         background: #ffffff;
         border: 1px solid #e2e8f0;
@@ -61,7 +59,6 @@ st.markdown("""
         margin-top: 4px;
     }
 
-    /* Email Cards */
     .email-card {
         background: #ffffff;
         border: 1.5px solid #e2e8f0;
@@ -75,7 +72,6 @@ st.markdown("""
         border-color: #94a3b8;
     }
 
-    /* Badges */
     .badge {
         font-size: 0.72rem;
         font-weight: 700;
@@ -89,7 +85,6 @@ st.markdown("""
     .badge-medium { background: #fef3c7; color: #92400e; border: 1px solid #fde68a; }
     .badge-low { background: #f3f4f6; color: #4b5563; border: 1px solid #e5e7eb; }
 
-    /* Event Container */
     .event-banner {
         background: #f0fdf4;
         border: 1.5px solid #86efac;
@@ -109,16 +104,30 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# 2. State & Auth Setup
+# 2. Hybrid OAuth Flow (Cloud & Local Support)
 # -----------------------------------------------------------------------------
-CLIENT_SECRETS_FILE = str(Path(__file__).parent / "client_secret.json")
-TOKEN_FILE = str(Path(__file__).parent / "token.json")
+CLIENT_SECRETS_FILE = Path(__file__).parent / "client_secret.json"
+TOKEN_FILE = Path(__file__).parent / "token.json"
 SCOPES = [
     'https://www.googleapis.com/auth/gmail.readonly',
     'https://www.googleapis.com/auth/calendar.events'
 ]
-REDIRECT_URI = "http://localhost:8501"
 
+# Uses cloud APP_URL if present, defaults to localhost for dev
+REDIRECT_URI = st.secrets.get("APP_URL", "http://localhost:8501")
+
+def get_oauth_flow():
+    """Builds the OAuth flow whether on local disk or Streamlit Cloud secrets."""
+    if "google_oauth" in st.secrets:
+        client_config = dict(st.secrets["google_oauth"])
+        return Flow.from_client_config(client_config, scopes=SCOPES, redirect_uri=REDIRECT_URI)
+    elif CLIENT_SECRETS_FILE.exists():
+        return Flow.from_client_secrets_file(str(CLIENT_SECRETS_FILE), scopes=SCOPES, redirect_uri=REDIRECT_URI)
+    else:
+        st.error("Missing Google OAuth credentials. Configure client_secret.json or st.secrets.")
+        st.stop()
+
+# Session State
 if "scan_results" not in st.session_state:
     st.session_state.scan_results = []
 if "synced_events" not in st.session_state:
@@ -129,7 +138,7 @@ if "credentials" not in st.session_state:
 # Auto-login via persisted token.json
 if not st.session_state.credentials and os.path.exists(TOKEN_FILE):
     try:
-        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
+        creds = Credentials.from_authorized_user_file(str(TOKEN_FILE), SCOPES)
         if creds and creds.expired and creds.refresh_token:
             creds.refresh(Request())
             with open(TOKEN_FILE, 'w') as tf:
@@ -148,7 +157,7 @@ def logout_user():
     st.session_state.synced_events = set()
     st.rerun()
 
-# Catch OAuth Redirect
+# OAuth Callback Handler
 query_params = st.query_params
 if "code" in query_params and not st.session_state.credentials:
     code = query_params["code"]
@@ -159,12 +168,15 @@ if "code" in query_params and not st.session_state.credentials:
         st.error("Authentication expired. Please restart.")
         st.stop()
 
-    flow = Flow.from_client_secrets_file(CLIENT_SECRETS_FILE, scopes=SCOPES, redirect_uri=REDIRECT_URI)
+    flow = get_oauth_flow()
     flow.fetch_token(code=code, code_verifier=saved_verifier)
     creds = flow.credentials
 
-    with open(TOKEN_FILE, 'w') as tf:
-        tf.write(creds.to_json())
+    try:
+        with open(TOKEN_FILE, 'w') as tf:
+            tf.write(creds.to_json())
+    except Exception:
+        pass  # Graceful fallback on read-only cloud filesystems
 
     st.session_state.credentials = creds
     st.query_params.clear()
@@ -187,7 +199,7 @@ def fetch_recent_emails(gmail_service, max_results=8):
     return fetched
 
 # -----------------------------------------------------------------------------
-# 3. Unauthenticated View
+# 3. Unauthenticated Screen
 # -----------------------------------------------------------------------------
 if not st.session_state.credentials:
     st.markdown("<div style='margin-top: 12vh;'></div>", unsafe_allow_html=True)
@@ -201,7 +213,7 @@ if not st.session_state.credentials:
         """, unsafe_allow_html=True)
         st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
 
-        flow = Flow.from_client_secrets_file(CLIENT_SECRETS_FILE, scopes=SCOPES, redirect_uri=REDIRECT_URI)
+        flow = get_oauth_flow()
         auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline')
         with open("verifier.txt", "w") as vf:
             vf.write(flow.code_verifier)
@@ -210,7 +222,7 @@ if not st.session_state.credentials:
     st.stop()
 
 # -----------------------------------------------------------------------------
-# 4. Navigation Header
+# 4. Top Navigation Bar
 # -----------------------------------------------------------------------------
 header_left, header_mid, header_right = st.columns([3, 4, 1.5], vertical_alignment="center")
 
@@ -253,7 +265,6 @@ if nav_selection == "📥 Inbox Triage":
     with scan_col1:
         scan_btn = st.button("⚡ Scan Inbox & Extract Events", type="primary", use_container_width=True)
     with scan_col2:
-        # One-Click Sync All Action
         pending_events = [
             item for item in st.session_state.scan_results
             if item["analysis"].is_calendar_event and item["id"] not in st.session_state.synced_events
