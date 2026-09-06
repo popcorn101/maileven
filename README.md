@@ -1,8 +1,8 @@
-# ⚡ InboxPilot
+# ⚡ MailEven
 
 > **Autonomous AI-powered email triage and calendar synchronization engine.**
 
-InboxPilot parses incoming Gmail correspondence, screens messages against user-defined focus topics, generates executive-grade one-sentence TL;DRs, and automatically extracts and synchronizes actionable deadlines or meetings straight to Google Calendar.
+MailEven parses incoming Gmail correspondence, screens messages against user-defined focus topics, generates executive-grade one-sentence TL;DRs, and automatically extracts and synchronizes actionable deadlines or meetings straight to Google Calendar.
 
 ---
 
