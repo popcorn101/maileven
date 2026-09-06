@@ -71,9 +71,9 @@ Rules:
 """
 
     try:
-        # Fixed: Using the highly reliable LLaMA 3 70B model on Groq for JSON tasks
+        # Uses Groq's current flagship model
         response = client.chat.completions.create(
-            model="llama3-70b-8192", 
+            model="llama-3.3-70b-versatile", 
             messages=[
                 {"role": "system", "content": "You are a precise JSON-generating data extraction engine."},
                 {"role": "user", "content": prompt}
@@ -89,8 +89,9 @@ Rules:
         return [SingleEmailAnalysis(**item) for item in raw_list]
 
     except Exception as e:
-        print(f"Groq API Error: {e}")
-        # Return empty list gracefully so the app doesn't crash on API failure
+        # SURFACES THE ERROR DIRECTLY TO THE STREAMLIT UI
+        st.error(f"Groq API Error: {str(e)}")
+        print(f"Groq API Error: {str(e)}")
         return []
 
 def format_rfc3339(iso_str: str, timezone_offset="+05:30") -> str:
@@ -120,7 +121,7 @@ def add_to_calendar(calendar_service, analysis: SingleEmailAnalysis, user_timezo
 
     event_body = {
         'summary': analysis.event_title or 'Actionable Email Event',
-        'description': f"Auto-detected by InboxPilot.\n\nSummary: {analysis.summary}\nTopic: {analysis.matched_topic}",
+        'description': f"Auto-detected by MailEven.\n\nSummary: {analysis.summary}\nTopic: {analysis.matched_topic}",
         'location': analysis.location or '',
         'start': {
             'dateTime': start_rfc,
