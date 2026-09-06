@@ -117,14 +117,28 @@ SCOPES = [
 REDIRECT_URI = st.secrets.get("APP_URL", "http://localhost:8501")
 
 def get_oauth_flow():
-    """Builds the OAuth flow whether on local disk or Streamlit Cloud secrets."""
+    """Builds the OAuth flow correctly for local or Streamlit Cloud environments."""
     if "google_oauth" in st.secrets:
-        client_config = dict(st.secrets["google_oauth"])
-        return Flow.from_client_config(client_config, scopes=SCOPES, redirect_uri=REDIRECT_URI)
+        raw_config = st.secrets["google_oauth"]
+        # Ensure the dict has the {"web": {...}} wrapper Google expects
+        if "web" in raw_config:
+            client_config = {"web": dict(raw_config["web"])}
+        else:
+            client_config = {"web": dict(raw_config)}
+            
+        return Flow.from_client_config(
+            client_config, 
+            scopes=SCOPES, 
+            redirect_uri=REDIRECT_URI
+        )
     elif CLIENT_SECRETS_FILE.exists():
-        return Flow.from_client_secrets_file(str(CLIENT_SECRETS_FILE), scopes=SCOPES, redirect_uri=REDIRECT_URI)
+        return Flow.from_client_secrets_file(
+            str(CLIENT_SECRETS_FILE), 
+            scopes=SCOPES, 
+            redirect_uri=REDIRECT_URI
+        )
     else:
-        st.error("Missing Google OAuth credentials. Configure client_secret.json or st.secrets.")
+        st.error("Missing Google OAuth credentials.")
         st.stop()
 
 # Session State
