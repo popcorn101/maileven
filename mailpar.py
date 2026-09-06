@@ -4,6 +4,7 @@ from googleapiclient.discovery import build
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 import os
+import base64
 from pathlib import Path
 from analyzer import analyze_emails_batch, add_to_calendar
 
@@ -65,13 +66,8 @@ st.markdown("""
         border: 1px solid #e2e8f0;
         border-radius: 10px;
         padding: 16px 20px;
-        margin-bottom: 10px;
-        transition: all 0.15s ease;
+        margin-bottom: 8px;
         box-shadow: 0 1px 2px rgba(15, 23, 42, 0.02);
-    }
-    .inbox-row:hover {
-        border-color: #cbd5e1;
-        box-shadow: 0 4px 10px rgba(15, 23, 42, 0.04);
     }
 
     /* AI Analysis Card */
@@ -80,7 +76,7 @@ st.markdown("""
         border: 1.5px solid #e2e8f0;
         border-radius: 14px;
         padding: 20px 24px;
-        margin-bottom: 14px;
+        margin-bottom: 12px;
         box-shadow: 0 2px 4px rgba(15, 23, 42, 0.02);
     }
 
@@ -102,7 +98,7 @@ st.markdown("""
         border: 1.5px solid #86efac;
         border-radius: 10px;
         padding: 12px 16px;
-        margin-top: 14px;
+        margin: 12px 0;
         display: flex;
         align-items: center;
         gap: 12px;
@@ -116,7 +112,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# 2. Hybrid OAuth Flow (Cloud & Local Support)
+# 2. Hybrid OAuth Flow & Gmail Helpers
 # -----------------------------------------------------------------------------
 CLIENT_SECRETS_FILE = Path(__file__).parent / "client_secret.json"
 TOKEN_FILE = Path(__file__).parent / "token.json"
@@ -204,8 +200,29 @@ if "code" in query_params and not st.session_state.credentials:
     st.query_params.clear()
     st.rerun()
 
+def decode_body(payload):
+    """Recursively walks message MIME parts to extract the readable plain text or HTML body."""
+    body_text = ""
+    if 'parts' in payload:
+        for part in payload['parts']:
+            mime = part.get('mimeType', '')
+            data = part.get('body', {}).get('data', '')
+            if mime == 'text/plain' and data:
+                return base64.urlsafe_b64decode(data).decode('utf-8', errors='ignore')
+            elif mime == 'text/html' and data and not body_text:
+                body_text = base64.urlsafe_b64decode(data).decode('utf-8', errors='ignore')
+            elif 'parts' in part:
+                res = decode_body(part)
+                if res:
+                    return res
+    else:
+        data = payload.get('body', {}).get('data', '')
+        if data:
+            return base64.urlsafe_b64decode(data).decode('utf-8', errors='ignore')
+    return body_text
+
 def fetch_recent_emails(gmail_service, max_results=15):
-    """Fetches messages directly from Gmail API without filtering dates."""
+    """Fetches full email details including the decoded body text."""
     results = gmail_service.users().messages().list(
         userId='me',
         maxResults=max_results
@@ -215,18 +232,50 @@ def fetch_recent_emails(gmail_service, max_results=15):
     for msg in messages:
         full = gmail_service.users().messages().get(userId='me', id=msg['id'], format='full').execute()
         snippet = full.get('snippet', '')
-        headers = {h['name']: h['value'] for h in full.get('payload', {}).get('headers', [])}
+        payload = full.get('payload', {})
+        headers = {h['name']: h['value'] for h in payload.get('headers', [])}
+        
+        body_content = decode_body(payload)
+        if not body_content.strip():
+            body_content = snippet
+
         fetched.append({
             'id': msg['id'],
             'subject': headers.get('Subject', '(No Subject)'),
             'sender': headers.get('From', 'Unknown Sender'),
             'date': headers.get('Date', ''),
-            'snippet': snippet
+            'snippet': snippet,
+            'body': body_content
         })
     return fetched
 
 # -----------------------------------------------------------------------------
-# 3. Unauthenticated Screen
+# 3. Gmail-Style Email Reader Modal
+# -----------------------------------------------------------------------------
+@st.dialog("Email Details", width="large")
+def show_email_modal(msg):
+    st.markdown(f"### {msg['subject']}")
+    c1, c2 = st.columns([3, 1])
+    with c1:
+        st.markdown(f"**From:** `{msg['sender']}`")
+    with c2:
+        st.caption(msg.get('date', ''))
+    
+    st.divider()
+    
+    # Render body safely in an insulated scrollable frame
+    body = msg.get('body', msg.get('snippet', ''))
+    if "<html" in body.lower() or "<div" in body.lower() or "<p" in body.lower():
+        st.components.v1.html(
+            f"<div style='font-family: sans-serif; color: #1e293b; line-height: 1.6; word-break: break-word;'>{body}</div>",
+            height=450,
+            scrolling=True
+        )
+    else:
+        st.text_area("Content", value=body, height=400, disabled=True, label_visibility="collapsed")
+
+# -----------------------------------------------------------------------------
+# 4. Unauthenticated Screen
 # -----------------------------------------------------------------------------
 if not st.session_state.credentials:
     st.markdown("<div style='margin-top: 12vh;'></div>", unsafe_allow_html=True)
@@ -253,7 +302,7 @@ if not st.session_state.credentials:
     st.stop()
 
 # -----------------------------------------------------------------------------
-# 4. Top Navigation Bar (Three Distinct Tabs)
+# 5. Top Navigation Bar
 # -----------------------------------------------------------------------------
 header_left, header_mid, header_right = st.columns([2.5, 5, 1.5], vertical_alignment="center")
 
@@ -275,33 +324,31 @@ with header_right:
 st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# 5. Routing Views
+# 6. Routing Views
 # -----------------------------------------------------------------------------
 
-# --- VIEW 1: REGULAR RAW INBOX (NO GROQ / NO TOKEN USAGE) ---
+# --- VIEW 1: REGULAR RAW INBOX ---
 if nav_selection == "📬 Inbox":
     inbox_col1, inbox_col2 = st.columns([4, 1.2], vertical_alignment="center")
     with inbox_col1:
         st.markdown("#### Primary Inbox")
-        st.caption("Direct Gmail synchronization. Review incoming messages before running AI triage.")
+        st.caption("Direct Gmail synchronization. Click any message to open the full content.")
     with inbox_col2:
         fetch_limit = st.selectbox("Messages to fetch", [10, 15, 25, 30], index=1)
         if st.button("🔄 Refresh Inbox", type="primary", use_container_width=True):
-            with st.spinner("Fetching latest messages from Gmail..."):
+            with st.spinner("Fetching latest messages..."):
                 gmail = build('gmail', 'v1', credentials=st.session_state.credentials)
                 st.session_state.raw_inbox = fetch_recent_emails(gmail, max_results=fetch_limit)
             st.rerun()
 
-    # Initial auto-load if list is empty
     if not st.session_state.raw_inbox:
         with st.spinner("Connecting to Gmail..."):
             gmail = build('gmail', 'v1', credentials=st.session_state.credentials)
             st.session_state.raw_inbox = fetch_recent_emails(gmail, max_results=fetch_limit)
         st.rerun()
 
-    st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
+    st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
 
-    # Render Regular Email List
     for msg in st.session_state.raw_inbox:
         sender_clean = msg["sender"].replace("<", "&lt;").replace(">", "&gt;")
         st.markdown(f"""
@@ -310,10 +357,14 @@ if nav_selection == "📬 Inbox":
                 <span style="font-weight:700; color:#0f172a; font-size:1.02rem;">{msg['subject']}</span>
                 <span style="font-size:0.78rem; color:#94a3b8; font-weight:600;">{msg['date'][:16]}</span>
             </div>
-            <div style="font-size:0.82rem; font-weight:600; color:#2563eb; margin-bottom:8px;">{sender_clean}</div>
+            <div style="font-size:0.82rem; font-weight:600; color:#2563eb; margin-bottom:6px;">{sender_clean}</div>
             <div style="font-size:0.88rem; color:#475569; line-height:1.45;">{msg['snippet']}</div>
         </div>
         """, unsafe_allow_html=True)
+        
+        # Click action button right below the row to read full mail
+        if st.button("📖 Read Full Email", key=f"view_raw_{msg['id']}"):
+            show_email_modal(msg)
 
 
 # --- VIEW 2: AI TRIAGE (USES GROQ) ---
@@ -365,12 +416,14 @@ elif nav_selection == "⚡ AI Triage":
             processed = []
             for item in raw:
                 an = analysis_map.get(item["id"])
-                # Show matches, or all emails parsed if debug needed
                 if an and an.is_relevant:
                     processed.append({
                         "id": item["id"],
                         "subject": item["subject"],
                         "sender": item["sender"],
+                        "date": item.get("date", ""),
+                        "snippet": item["snippet"],
+                        "body": item.get("body", ""),
                         "analysis": an
                     })
 
@@ -417,16 +470,20 @@ elif nav_selection == "⚡ AI Triage":
             </div>
             """, unsafe_allow_html=True)
 
-            if an.is_calendar_event and an.start_time:
-                btn_col, _ = st.columns([1.6, 4])
-                with btn_col:
+            btn_col1, btn_col2, _ = st.columns([1.5, 1.8, 3])
+            with btn_col1:
+                if st.button("📖 Read Email", key=f"view_triage_{email_id}"):
+                    show_email_modal(item)
+            
+            with btn_col2:
+                if an.is_calendar_event and an.start_time:
                     if email_id in st.session_state.synced_events:
-                        st.button("✓ Added to Calendar", key=f"synced_{email_id}", disabled=True)
+                        st.button("✓ Added", key=f"synced_{email_id}", disabled=True)
                     else:
                         if st.button("📅 Add to Calendar", key=f"add_{email_id}", type="primary"):
                             try:
                                 cal = build('calendar', 'v3', credentials=st.session_state.credentials)
-                                link = add_to_calendar(cal, an)
+                                add_to_calendar(cal, an)
                                 st.session_state.synced_events.add(email_id)
                                 st.toast(f"Synced: {an.event_title}")
                                 st.rerun()
