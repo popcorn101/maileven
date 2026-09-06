@@ -18,8 +18,8 @@ class SingleEmailAnalysis(BaseModel):
     summary: str = Field(default="")
     is_calendar_event: bool = Field(default=False)
     event_title: Optional[str] = None
-    start_time: Optional[str] = None  # Strict format: YYYY-MM-DDTHH:MM:SS
-    end_time: Optional[str] = None    # Strict format: YYYY-MM-DDTHH:MM:SS
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
     location: Optional[str] = None
 
 # Pull Groq key dynamically from Streamlit Cloud secrets, fallback to local .env
@@ -38,7 +38,7 @@ def analyze_emails_batch(emails: list[dict], interests: list[str]) -> list[Singl
     current_time_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
 
     email_payload = "\n---\n".join([
-        f"ID: {e['id']}\nSubject: {e['subject']}\nSnippet: {e['snippet'][:180]}"
+        f"ID: {e['id']}\nSubject: {e['subject']}\nSnippet: {e['snippet'][:250]}"
         for e in emails
     ])
 
@@ -56,8 +56,8 @@ For every email, output:
 - "is_relevant": boolean (true if relevant to user interests)
 - "matched_topic": string or null
 - "priority": string ("High", "Medium", or "Low")
-- "summary": string (concise 1-sentence summary under 15 words)
-- "is_calendar_event": boolean (true ONLY if there is an explicit date/time or deadline mentioned)
+- "summary": string (concise 1-sentence summary)
+- "is_calendar_event": boolean (true ONLY if there is an explicit date/time or deadline)
 - "event_title": string or null
 - "start_time": string in strict ISO 8601 format (YYYY-MM-DDTHH:MM:SS) without timezone offset, or null
 - "end_time": string in strict ISO 8601 format (YYYY-MM-DDTHH:MM:SS) without timezone offset, or null
@@ -67,19 +67,20 @@ Rules:
 1. Relative dates like "tomorrow at 3 PM" must be computed relative to {current_time_str}.
 2. If only a date is mentioned (no hour), default the time to 10:00:00.
 3. If no end time is specified, calculate it as 1 hour after start_time.
-4. Return raw JSON only.
+4. Return ONLY valid JSON.
 """
 
     try:
+        # Fixed: Using the highly reliable LLaMA 3 70B model on Groq for JSON tasks
         response = client.chat.completions.create(
-            model="openai/gpt-oss-20b",
+            model="llama3-70b-8192", 
             messages=[
-                {"role": "system", "content": "You are an executive email triage parser that returns strictly valid JSON."},
+                {"role": "system", "content": "You are a precise JSON-generating data extraction engine."},
                 {"role": "user", "content": prompt}
             ],
             response_format={"type": "json_object"},
             temperature=0.1,
-            max_tokens=1000
+            max_tokens=2048
         )
 
         content = response.choices[0].message.content
@@ -88,11 +89,14 @@ Rules:
         return [SingleEmailAnalysis(**item) for item in raw_list]
 
     except Exception as e:
-        print(f"Error in Groq analysis: {e}")
+        print(f"Groq API Error: {e}")
+        # Return empty list gracefully so the app doesn't crash on API failure
         return []
 
 def format_rfc3339(iso_str: str, timezone_offset="+05:30") -> str:
     """Ensures timestamp string strictly complies with Google Calendar RFC 3339."""
+    if not iso_str:
+        return ""
     clean_str = iso_str.strip().replace("Z", "")
     if len(clean_str) == 10:
         clean_str += "T10:00:00"
