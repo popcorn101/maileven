@@ -2,118 +2,122 @@ import streamlit as st
 from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 from pathlib import Path
-from analyzer import analyze_email, add_to_calendar
+from datetime import datetime
+from analyzer import analyze_emails_batch, add_to_calendar
 
 # -----------------------------------------------------------------------------
-# 1. Page Configuration & Custom CSS (Notion/Linear Design System)
+# 1. Page Config & Modern SaaS Styling
 # -----------------------------------------------------------------------------
 st.set_page_config(
-    page_title="InboxPilot | AI Email & Calendar Engine",
+    page_title="InboxPilot | AI Intelligence Hub",
     page_icon="⚡",
-    layout="centered",
-    initial_sidebar_state="collapsed"
+    layout="wide",
+    initial_sidebar_state="expanded"
 )
 
-# Custom Design System: Inter typography, minimalist cards, sleek badges, subtle borders
+# Custom Theme: Linear/Vercel slate palette, Inter typography, micro-borders
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
 
     html, body, [class*="css"] {
         font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+        color: #0f172a;
     }
 
-    /* Main Container Padding */
+    /* Remove default Streamlit top blank padding */
     .block-container {
-        padding-top: 2.5rem;
-        padding-bottom: 4rem;
-        max-width: 780px;
+        padding-top: 1.75rem;
+        padding-bottom: 3rem;
+        max-width: 1200px;
     }
 
-    /* Clean Card Container */
-    .notion-card {
+    /* Metric Cards */
+    .metric-box {
         background: #ffffff;
-        border: 1px solid #e5e7eb;
+        border: 1px solid #e2e8f0;
+        border-radius: 10px;
+        padding: 1rem 1.25rem;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.03);
+    }
+    .metric-label {
+        font-size: 0.75rem;
+        font-weight: 600;
+        color: #64748b;
+        text-transform: uppercase;
+        letter-spacing: 0.04em;
+    }
+    .metric-value {
+        font-size: 1.6rem;
+        font-weight: 700;
+        color: #0f172a;
+        margin-top: 0.2rem;
+    }
+
+    /* Event & Digest Card Container */
+    .dashboard-card {
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
         border-radius: 12px;
         padding: 1.25rem 1.5rem;
         margin-bottom: 1rem;
-        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
-        transition: all 0.2s ease;
+        transition: all 0.15s ease;
+        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.02);
     }
-    .notion-card:hover {
-        border-color: #d1d5db;
-        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.06);
-    }
-
-    /* Typography */
-    .card-title {
-        font-size: 1.05rem;
-        font-weight: 600;
-        color: #111827;
-        margin-bottom: 0.25rem;
-    }
-    .card-meta {
-        font-size: 0.8rem;
-        color: #6b7280;
-        margin-bottom: 0.75rem;
-    }
-    .card-summary {
-        font-size: 0.92rem;
-        color: #374151;
-        line-height: 1.5;
-        margin-bottom: 0.9rem;
+    .dashboard-card:hover {
+        border-color: #cbd5e1;
+        box-shadow: 0 6px 16px rgba(0, 0, 0, 0.05);
     }
 
     /* Pill Badges */
     .badge {
-        display: inline-block;
+        display: inline-flex;
+        align-items: center;
         font-size: 0.72rem;
-        font-weight: 500;
-        padding: 2px 8px;
+        font-weight: 600;
+        padding: 3px 9px;
         border-radius: 9999px;
-        text-transform: uppercase;
-        letter-spacing: 0.03em;
+        letter-spacing: 0.02em;
     }
     .badge-topic {
-        background-color: #f3f4f6;
-        color: #374151;
-        border: 1px solid #e5e7eb;
+        background: #f1f5f9;
+        color: #334155;
+        border: 1px solid #e2e8f0;
     }
     .badge-event {
-        background-color: #eff6ff;
-        color: #1d4ed8;
+        background: #eff6ff;
+        color: #2563eb;
         border: 1px solid #bfdbfe;
     }
 
-    /* Event highlight strip */
-    .event-strip {
-        display: flex;
-        align-items: center;
-        gap: 8px;
+    /* Highlight Banner for Scheduled Events */
+    .event-banner {
         background: #f8fafc;
-        border-left: 3px solid #3b82f6;
-        padding: 8px 12px;
-        border-radius: 4px;
-        font-size: 0.85rem;
-        color: #1e293b;
-        margin-bottom: 0.75rem;
+        border: 1px solid #e2e8f0;
+        border-left: 4px solid #3b82f6;
+        border-radius: 6px;
+        padding: 10px 14px;
+        margin: 12px 0;
+        display: flex;
+        flex-direction: column;
+        gap: 3px;
     }
 
-    /* Primary CTA Button Polish */
-    div.stButton > button:first-child {
+    /* Modern Buttons */
+    div.stButton > button {
         border-radius: 8px;
         font-weight: 500;
-        border: 1px solid #e5e7eb;
+        font-size: 0.9rem;
         transition: all 0.15s ease;
     }
-    div.stButton > button:first-child:hover {
-        border-color: #9ca3af;
+    div.stButton > button:hover {
+        border-color: #94a3b8;
     }
 </style>
 """, unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
-# 2. App State & OAuth Setup
+# 2. Session State & Authentication Setup
 # -----------------------------------------------------------------------------
 CLIENT_SECRETS_FILE = str(Path(__file__).parent / "client_secret.json")
 SCOPES = [
@@ -128,6 +132,8 @@ if "scan_results" not in st.session_state:
     st.session_state.scan_results = []
 if "synced_events" not in st.session_state:
     st.session_state.synced_events = set()
+if "total_scanned_count" not in st.session_state:
+    st.session_state.total_scanned_count = 0
 
 def get_auth_url():
     flow = Flow.from_client_secrets_file(
@@ -140,7 +146,7 @@ def get_auth_url():
         f.write(flow.code_verifier)
     return auth_url
 
-# Handle OAuth redirect
+# OAuth Callback Handler
 query_params = st.query_params
 if "code" in query_params and not st.session_state.credentials:
     code = query_params["code"]
@@ -148,7 +154,7 @@ if "code" in query_params and not st.session_state.credentials:
         with open("verifier.txt", "r") as f:
             saved_verifier = f.read().strip()
     except FileNotFoundError:
-        st.error("Session expired. Please sign in again.")
+        st.error("Authentication expired. Please log in again.")
         st.stop()
 
     flow = Flow.from_client_secrets_file(
@@ -161,7 +167,7 @@ if "code" in query_params and not st.session_state.credentials:
     st.query_params.clear()
     st.rerun()
 
-def fetch_recent_emails(gmail_service, max_results=8):
+def fetch_recent_emails(gmail_service, max_results=10):
     results = gmail_service.users().messages().list(
         userId='me', q='newer_than:7d', maxResults=max_results
     ).execute()
@@ -175,6 +181,7 @@ def fetch_recent_emails(gmail_service, max_results=8):
         snippet = full_msg.get('snippet', '')
         payload = full_msg.get('payload', {})
         headers = {h['name']: h['value'] for h in payload.get('headers', [])}
+        
         fetched.append({
             'id': msg['id'],
             'subject': headers.get('Subject', 'No Subject'),
@@ -184,113 +191,198 @@ def fetch_recent_emails(gmail_service, max_results=8):
     return fetched
 
 # -----------------------------------------------------------------------------
-# 3. Clean Notion-like Header & Controls
+# 3. Sidebar Command Center
 # -----------------------------------------------------------------------------
-st.title("⚡ InboxPilot")
-st.caption("Intelligent inbox triage and calendar sync aligned with your personal interests.")
+with st.sidebar:
+    st.markdown("### ⚡ **InboxPilot**")
+    st.caption("Context-Aware Email Triage & Calendar Sync Engine")
+    st.divider()
 
-st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
+    st.markdown("**⚙️ Configuration**")
+    interests_input = st.text_area(
+        "Focus Topics",
+        value="Hackathons, Tech Talks, Workshops, AI Meetups, College Seminars",
+        help="InboxPilot evaluates all incoming correspondence against these topics."
+    )
+    interest_list = [t.strip() for t in interests_input.split(",") if t.strip()]
 
-# Interest tags input
-interests_input = st.text_input(
-    "Target Interests",
-    value="Hackathons, Tech Talks, AI, Coding Meetups",
-    help="InboxPilot parses incoming emails against these topics."
-)
-interest_list = [item.strip() for item in interests_input.split(",") if item.strip()]
+    email_count_limit = st.slider("Inbox Depth (Messages)", min_value=5, max_value=20, value=8)
 
-# -----------------------------------------------------------------------------
-# 4. Auth & Action Flow
-# -----------------------------------------------------------------------------
-if not st.session_state.credentials:
-    st.markdown("<div style='height: 8px;'></div>", unsafe_allow_html=True)
-    auth_url = get_auth_url()
-    st.link_button("Connect Google Workspace / Gmail →", auth_url, use_container_width=True)
-else:
-    col1, col2 = st.columns([3, 1])
-    with col1:
-        scan_btn = st.button("Run Inbox Scan", type="primary", use_container_width=True)
-    with col2:
-        if st.button("Disconnect", use_container_width=True):
+    st.divider()
+
+    if not st.session_state.credentials:
+        auth_url = get_auth_url()
+        st.link_button("🔗 Connect Google Account", auth_url, use_container_width=True)
+    else:
+        st.success("🟢 Google Services Connected")
+        if st.button("Disconnect Account", use_container_width=True):
             st.session_state.credentials = None
             st.session_state.scan_results = []
+            st.session_state.synced_events = set()
+            st.session_state.total_scanned_count = 0
             st.rerun()
 
-    if scan_btn:
-        with st.status("Analyzing inbox against focus topics...", expanded=True) as status:
-            st.write("Connecting to Gmail API...")
-            gmail = build('gmail', 'v1', credentials=st.session_state.credentials)
-            calendar = build('calendar', 'v3', credentials=st.session_state.credentials)
-            
-            st.write("Extracting recent primary messages...")
-            raw_emails = fetch_recent_emails(gmail)
-            
-            st.write("Processing context with Gemini Flash...")
-            processed = []
-            for email in raw_emails:
-                analysis = analyze_email(
-                    subject=email['subject'],
-                    sender=email['sender'],
-                    snippet=email['snippet'],
-                    interests=interest_list
-                )
-                if analysis.is_relevant:
-                    processed.append({
-                        "id": email["id"],
-                        "subject": email["subject"],
-                        "sender": email["sender"],
-                        "analysis": analysis
-                    })
-            
-            st.session_state.scan_results = processed
-            status.update(label=f"Scan complete — {len(processed)} relevant threads found", state="complete", expanded=False)
+# -----------------------------------------------------------------------------
+# 4. Top Analytics Bar
+# -----------------------------------------------------------------------------
+matched_threads = st.session_state.scan_results
+actionable_events = [m for m in matched_threads if m["analysis"].is_calendar_event]
+synced_count = len(st.session_state.synced_events)
 
-    # -------------------------------------------------------------------------
-    # 5. Notion/Linear Card Feed
-    # -------------------------------------------------------------------------
-    if st.session_state.scan_results:
-        st.markdown(f"<p style='font-size: 0.85rem; color: #6b7280; font-weight: 500; margin-top: 1.5rem;'>RELEVANT THREADS ({len(st.session_state.scan_results)})</p>", unsafe_allow_html=True)
+col_m1, col_m2, col_m3, col_m4 = st.columns(4)
 
-        for item in st.session_state.scan_results:
-            email_id = item["id"]
-            analysis = item["analysis"]
-            
-            with st.container():
-                # Render clean HTML Card
-                event_html = ""
-                if analysis.is_calendar_event and analysis.start_time:
-                    event_html = f"""
-                    <div class="event-strip">
-                        <span>📅</span>
-                        <span><strong>{analysis.event_title or 'Event'}</strong> · {analysis.start_time} {f'· {analysis.location}' if analysis.location else ''}</span>
-                    </div>
-                    """
+with col_m1:
+    st.markdown(f"""
+    <div class="metric-box">
+        <div class="metric-label">Threads Scanned</div>
+        <div class="metric-value">{st.session_state.total_scanned_count}</div>
+    </div>
+    """, unsafe_allow_html=True)
 
-                st.markdown(f"""
-                <div class="notion-card">
-                    <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 4px;">
-                        <span class="card-title">{item['subject']}</span>
-                        <span class="badge badge-topic">{analysis.matched_topic or 'General'}</span>
-                    </div>
-                    <div class="card-meta">From: {item['sender']}</div>
-                    <div class="card-summary">{analysis.summary}</div>
-                    {event_html}
+with col_m2:
+    st.markdown(f"""
+    <div class="metric-box">
+        <div class="metric-label">Relevant Matches</div>
+        <div class="metric-value">{len(matched_threads)}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+with col_m3:
+    st.markdown(f"""
+    <div class="metric-box">
+        <div class="metric-label">Detected Events</div>
+        <div class="metric-value">{len(actionable_events)}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+with col_m4:
+    st.markdown(f"""
+    <div class="metric-box">
+        <div class="metric-label">Calendar Syncs</div>
+        <div class="metric-value">{synced_count}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+st.markdown("<div style='height: 20px;'></div>", unsafe_allow_html=True)
+
+# -----------------------------------------------------------------------------
+# 5. Primary Control Deck & Batch Runner
+# -----------------------------------------------------------------------------
+action_col1, action_col2 = st.columns([3, 1])
+
+with action_col1:
+    st.markdown("#### **Active Triage Feed**")
+    st.caption("Emails categorized by topic alignment, actionable dates, and executive summaries.")
+
+with action_col2:
+    if st.session_state.credentials:
+        trigger_scan = st.button("⚡ Run Inbox Scan", type="primary", use_container_width=True)
+    else:
+        trigger_scan = False
+
+if trigger_scan:
+    with st.status("Analyzing inbox...", expanded=True) as status_box:
+        st.write("Fetching messages via Gmail API...")
+        gmail = build('gmail', 'v1', credentials=st.session_state.credentials)
+        raw_emails = fetch_recent_emails(gmail, max_results=email_count_limit)
+        st.session_state.total_scanned_count = len(raw_emails)
+
+        st.write("Executing high-speed batch context parsing...")
+        analyses = analyze_emails_batch(raw_emails, interest_list)
+
+        analysis_map = {a.id: a for a in analyses}
+        processed = []
+        for email in raw_emails:
+            an = analysis_map.get(email["id"])
+            if an and an.is_relevant:
+                processed.append({
+                    "id": email["id"],
+                    "subject": email["subject"],
+                    "sender": email["sender"],
+                    "analysis": an
+                })
+
+        st.session_state.scan_results = processed
+        status_box.update(label=f"Done — Identified {len(processed)} relevant threads", state="complete", expanded=False)
+        st.rerun()
+
+# -----------------------------------------------------------------------------
+# 6. Tabbed Dashboard Feed
+# -----------------------------------------------------------------------------
+if not st.session_state.credentials:
+    st.info("👋 Welcome! Connect your Google Account using the sidebar to begin syncing events.")
+elif not st.session_state.scan_results:
+    st.info("No scanned threads yet. Tap **⚡ Run Inbox Scan** above to process your inbox.")
+else:
+    tab1, tab2, tab3 = st.tabs([
+        f"🎯 All Matches ({len(matched_threads)})",
+        f"📅 Events to Sync ({len(actionable_events)})",
+        f"📝 Summaries Only ({len(matched_threads) - len(actionable_events)})"
+    ])
+
+    def render_card(item):
+        email_id = item["id"]
+        analysis = item["analysis"]
+        sender_clean = item['sender'].replace('<', '&lt;').replace('>', '&gt;')
+
+        event_markup = ""
+        if analysis.is_calendar_event and analysis.start_time:
+            loc_text = f" &nbsp;•&nbsp; 📍 {analysis.location}" if analysis.location else ""
+            event_markup = f"""
+            <div class="event-banner">
+                <div style="font-weight: 600; font-size: 0.88rem; color: #1e3a8a;">
+                    🗓️ {analysis.event_title or 'Scheduled Event'}
                 </div>
-                """, unsafe_allow_html=True)
+                <div style="font-size: 0.8rem; color: #475569;">
+                    ⏰ {analysis.start_time.replace('T', ' ')}{loc_text}
+                </div>
+            </div>
+            """
 
-                # Quick Actions for detected events
-                if analysis.is_calendar_event and analysis.start_time:
-                    cal_col1, cal_col2 = st.columns([1, 2])
-                    with cal_col1:
-                        if email_id in st.session_state.synced_events:
-                            st.button("✓ Added to Calendar", key=f"synced_{email_id}", disabled=True, use_container_width=True)
-                        else:
-                            if st.button("Add to Google Calendar", key=f"add_{email_id}", use_container_width=True):
-                                try:
-                                    calendar = build('calendar', 'v3', credentials=st.session_state.credentials)
-                                    cal_link = add_to_calendar(calendar, analysis, user_timezone="Asia/Kolkata")
-                                    st.session_state.synced_events.add(email_id)
-                                    st.toast(f"Scheduled: {analysis.event_title}")
-                                    st.rerun()
-                                except Exception as e:
-                                    st.error(f"Sync error: {e}")
+        st.markdown(f"""
+        <div class="dashboard-card">
+            <div style="display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 6px;">
+                <span style="font-weight: 600; font-size: 1.02rem; color: #0f172a;">{item['subject']}</span>
+                <span class="badge badge-topic">{analysis.matched_topic or 'General'}</span>
+            </div>
+            <div style="font-size: 0.8rem; color: #64748b; margin-bottom: 8px;">From: {sender_clean}</div>
+            <div style="font-size: 0.92rem; color: #334155; line-height: 1.5;">{analysis.summary}</div>
+            {event_markup}
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Action Buttons
+        if analysis.is_calendar_event and analysis.start_time:
+            btn_col1, btn_col2 = st.columns([1, 4])
+            with btn_col1:
+                if email_id in st.session_state.synced_events:
+                    st.button("✓ Added", key=f"synced_{email_id}", disabled=True, use_container_width=True)
+                else:
+                    if st.button("Add to Calendar", key=f"add_{email_id}", use_container_width=True):
+                        try:
+                            calendar = build('calendar', 'v3', credentials=st.session_state.credentials)
+                            cal_link = add_to_calendar(calendar, analysis, user_timezone="Asia/Kolkata")
+                            st.session_state.synced_events.add(email_id)
+                            st.toast(f"Event scheduled: {analysis.event_title}")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"Sync failed: {e}")
+
+    with tab1:
+        for item in matched_threads:
+            render_card(item)
+
+    with tab2:
+        if not actionable_events:
+            st.caption("No calendar events detected in the current inbox batch.")
+        else:
+            for item in actionable_events:
+                render_card(item)
+
+    with tab3:
+        digest_threads = [m for m in matched_threads if not m["analysis"].is_calendar_event]
+        if not digest_threads:
+            st.caption("All current matches contain actionable calendar dates.")
+        else:
+            for item in digest_threads:
+                render_card(item)
