@@ -316,7 +316,8 @@ if nav_selection == "📥 Inbox Triage":
             processed = []
             for item in raw:
                 an = analysis_map.get(item["id"])
-                if an and an.is_relevant:
+                # If Groq didn't parse it or marked it not relevant, still show it for debugging!
+                if an:
                     processed.append({
                         "id": item["id"],
                         "subject": item["subject"],
