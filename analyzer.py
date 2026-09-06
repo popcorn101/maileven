@@ -1,79 +1,134 @@
 import os
-from datetime import datetime
-from typing import Optional
+import json
+from datetime import datetime, timedelta
+from typing import Optional, List
 from pydantic import BaseModel, Field
-from google import genai
-from google.genai import types
-
 from dotenv import load_dotenv
+from openai import OpenAI
+
 load_dotenv()
 
-# 1. Define the exact structure we want back from the LLM
-class EmailAnalysis(BaseModel):
-    is_relevant: bool = Field(description="True if the email matches any of the user's interests")
-    matched_topic: Optional[str] = Field(None, description="The specific interest topic matched")
-    summary: str = Field(description="A crisp 1-2 sentence TL;DR of the email")
-    is_calendar_event: bool = Field(description="True if the email announces an event with a specific date/time")
-    event_title: Optional[str] = Field(None, description="Clear, short event title")
-    start_time: Optional[str] = Field(None, description="Event start in ISO 8601 format: YYYY-MM-DDTHH:MM:SS")
-    end_time: Optional[str] = Field(None, description="Event end in ISO 8601 format: YYYY-MM-DDTHH:MM:SS")
-    location: Optional[str] = Field(None, description="Physical location or virtual meeting URL")
+class SingleEmailAnalysis(BaseModel):
+    id: str = Field(default="")
+    is_relevant: bool = Field(default=False)
+    matched_topic: Optional[str] = None
+    priority: str = Field(default="Medium", description="High, Medium, or Low based on deadlines/actionability")
+    summary: str = Field(default="")
+    is_calendar_event: bool = Field(default=False)
+    event_title: Optional[str] = None
+    start_time: Optional[str] = None  # Format: YYYY-MM-DDTHH:MM:SS
+    end_time: Optional[str] = None    # Format: YYYY-MM-DDTHH:MM:SS
+    location: Optional[str] = None
 
-# Initialize client (picks up GEMINI_API_KEY from environment)
-client = genai.Client()
+client = OpenAI(
+    api_key=os.environ.get("GROQ_API_KEY"),
+    base_url="https://api.groq.com/openai/v1"
+)
 
-def analyze_email(subject: str, sender: str, snippet: str, interests: list[str]) -> EmailAnalysis:
-    current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
+def analyze_emails_batch(emails: list[dict], interests: list[str]) -> list[SingleEmailAnalysis]:
+    if not emails:
+        return []
+
+    # Current reference timestamp for Groq to resolve relative words like "tomorrow", "this Friday"
+    now_dt = datetime.now()
+    current_time_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
+
+    email_payload = "\n---\n".join([
+        f"ID: {e['id']}\nSubject: {e['subject']}\nSnippet: {e['snippet'][:180]}"
+        for e in emails
+    ])
+
     prompt = f"""
-    Current Date & Time: {current_time_str}
-    User Interests: {interests}
+Current Anchor Date/Time: {current_time_str}
+User Target Interests: {interests}
 
-    Email Details:
-    - From: {sender}
-    - Subject: {subject}
-    - Content/Snippet: {snippet}
+Emails to evaluate:
+{email_payload}
 
-    Instructions:
-    1. Determine if this email genuinely aligns with the user's interests.
-    2. Provide a 1-2 sentence summary.
-    3. If this email mentions an event (hackathon, meeting, webinar, concert, deadline):
-       - Extract the title, location, and start/end dates.
-       - Use the Current Date & Time to resolve relative terms like "this Friday" or "tomorrow at 4pm" into full ISO 8601 timestamps (YYYY-MM-DDTHH:MM:SS).
-       - If no end time is specified, estimate it as 1 hour after the start time.
-    """
+Instructions:
+Evaluate each email and return a JSON object with a single root key "analyses" containing an array of objects.
+For every email, output:
+- "id": string (the exact email ID provided)
+- "is_relevant": boolean (true if relevant to user interests)
+- "matched_topic": string or null
+- "priority": string ("High", "Medium", or "Low" based on whether it has immediate deadlines or actionable tasks)
+- "summary": string (concise 1-sentence summary under 15 words)
+- "is_calendar_event": boolean (true ONLY if there is an explicit date/time or deadline mentioned)
+- "event_title": string or null
+- "start_time": string in strict ISO 8601 format (YYYY-MM-DDTHH:MM:SS) without timezone offset, or null
+- "end_time": string in strict ISO 8601 format (YYYY-MM-DDTHH:MM:SS) without timezone offset, or null
+- "location": string (venue, meeting link, or null)
 
-    response = client.models.generate_content(
-        model='gemini-3.6-flash',
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=EmailAnalysis,
-            temperature=0.1  # Low temperature for strict factual extraction
-        ),
-    )
+Rules:
+1. Relative dates like "tomorrow at 3 PM" must be computed relative to {current_time_str}.
+2. If only a date is mentioned (no hour), default the time to 10:00:00.
+3. If no end time is specified, calculate it as 1 hour after start_time.
+4. Return raw JSON only.
+"""
 
-    # Automatically validated as an EmailAnalysis Pydantic instance
-    return response.parsed
+    try:
+        response = client.chat.completions.create(
+            model="openai/gpt-oss-20b",
+            messages=[
+                {"role": "system", "content": "You are an executive email triage parser that returns strictly valid JSON."},
+                {"role": "user", "content": prompt}
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.1,
+            max_tokens=1000
+        )
 
+        content = response.choices[0].message.content
+        raw_json = json.loads(content)
+        raw_list = raw_json.get("analyses", [])
+        return [SingleEmailAnalysis(**item) for item in raw_list]
 
-def add_to_calendar(calendar_service, analysis: EmailAnalysis, user_timezone="Asia/Kolkata"):
-    """Inserts the parsed event into the user's primary Google Calendar."""
+    except Exception as e:
+        print(f"Error in Groq analysis: {e}")
+        return []
+
+def format_rfc3339(iso_str: str, timezone_offset="+05:30") -> str:
+    """Ensures timestamp string strictly complies with Google Calendar RFC 3339."""
+    clean_str = iso_str.strip().replace("Z", "")
+    # If the model only provided YYYY-MM-DD, add standard hour
+    if len(clean_str) == 10:
+        clean_str += "T10:00:00"
+    return f"{clean_str}{timezone_offset}"
+
+def add_to_calendar(calendar_service, analysis: SingleEmailAnalysis, user_timezone="Asia/Kolkata"):
+    """Safely adds an event to Google Calendar with guaranteed valid timestamps."""
+    if not analysis.start_time:
+        raise ValueError("Missing start_time for calendar event.")
+
+    start_rfc = format_rfc3339(analysis.start_time)
+    
+    if analysis.end_time:
+        end_rfc = format_rfc3339(analysis.end_time)
+    else:
+        # Default end time to start + 1 hour
+        try:
+            start_dt = datetime.fromisoformat(analysis.start_time[:19])
+            end_rfc = format_rfc3339((start_dt + timedelta(hours=1)).isoformat())
+        except Exception:
+            end_rfc = start_rfc
+
     event_body = {
-        'summary': analysis.event_title or 'Event from Email',
-        'description': f"Auto-synced from email.\n\nSummary: {analysis.summary}",
+        'summary': analysis.event_title or 'Actionable Email Event',
+        'description': f"Auto-detected by InboxPilot.\n\nSummary: {analysis.summary}\nTopic: {analysis.matched_topic}",
         'location': analysis.location or '',
         'start': {
-            'dateTime': analysis.start_time,
+            'dateTime': start_rfc,
             'timeZone': user_timezone,
         },
         'end': {
-            'dateTime': analysis.end_time or analysis.start_time,
+            'dateTime': end_rfc,
             'timeZone': user_timezone,
         },
     }
-    created_event = calendar_service.events().insert(
-        calendarId='primary', 
+
+    created = calendar_service.events().insert(
+        calendarId='primary',
         body=event_body
     ).execute()
-    return created_event.get('htmlLink')
+
+    return created.get('htmlLink')
