@@ -5,23 +5,28 @@ from typing import Optional, List
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from openai import OpenAI
+import streamlit as st
 
 load_dotenv()
 
+# Data validation schema
 class SingleEmailAnalysis(BaseModel):
     id: str = Field(default="")
     is_relevant: bool = Field(default=False)
     matched_topic: Optional[str] = None
-    priority: str = Field(default="Medium", description="High, Medium, or Low based on deadlines/actionability")
+    priority: str = Field(default="Medium", description="High, Medium, or Low")
     summary: str = Field(default="")
     is_calendar_event: bool = Field(default=False)
     event_title: Optional[str] = None
-    start_time: Optional[str] = None  # Format: YYYY-MM-DDTHH:MM:SS
-    end_time: Optional[str] = None    # Format: YYYY-MM-DDTHH:MM:SS
+    start_time: Optional[str] = None  # Strict format: YYYY-MM-DDTHH:MM:SS
+    end_time: Optional[str] = None    # Strict format: YYYY-MM-DDTHH:MM:SS
     location: Optional[str] = None
 
+# Pull Groq key dynamically from Streamlit Cloud secrets, fallback to local .env
+api_key = st.secrets.get("GROQ_API_KEY", os.environ.get("GROQ_API_KEY"))
+
 client = OpenAI(
-    api_key=os.environ.get("GROQ_API_KEY"),
+    api_key=api_key,
     base_url="https://api.groq.com/openai/v1"
 )
 
@@ -29,7 +34,6 @@ def analyze_emails_batch(emails: list[dict], interests: list[str]) -> list[Singl
     if not emails:
         return []
 
-    # Current reference timestamp for Groq to resolve relative words like "tomorrow", "this Friday"
     now_dt = datetime.now()
     current_time_str = now_dt.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -51,7 +55,7 @@ For every email, output:
 - "id": string (the exact email ID provided)
 - "is_relevant": boolean (true if relevant to user interests)
 - "matched_topic": string or null
-- "priority": string ("High", "Medium", or "Low" based on whether it has immediate deadlines or actionable tasks)
+- "priority": string ("High", "Medium", or "Low")
 - "summary": string (concise 1-sentence summary under 15 words)
 - "is_calendar_event": boolean (true ONLY if there is an explicit date/time or deadline mentioned)
 - "event_title": string or null
@@ -90,7 +94,6 @@ Rules:
 def format_rfc3339(iso_str: str, timezone_offset="+05:30") -> str:
     """Ensures timestamp string strictly complies with Google Calendar RFC 3339."""
     clean_str = iso_str.strip().replace("Z", "")
-    # If the model only provided YYYY-MM-DD, add standard hour
     if len(clean_str) == 10:
         clean_str += "T10:00:00"
     return f"{clean_str}{timezone_offset}"
@@ -105,7 +108,6 @@ def add_to_calendar(calendar_service, analysis: SingleEmailAnalysis, user_timezo
     if analysis.end_time:
         end_rfc = format_rfc3339(analysis.end_time)
     else:
-        # Default end time to start + 1 hour
         try:
             start_dt = datetime.fromisoformat(analysis.start_time[:19])
             end_rfc = format_rfc3339((start_dt + timedelta(hours=1)).isoformat())
