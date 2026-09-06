@@ -59,6 +59,22 @@ st.markdown("""
         margin-top: 4px;
     }
 
+    /* Standard Raw Inbox Row */
+    .inbox-row {
+        background: #ffffff;
+        border: 1px solid #e2e8f0;
+        border-radius: 10px;
+        padding: 16px 20px;
+        margin-bottom: 10px;
+        transition: all 0.15s ease;
+        box-shadow: 0 1px 2px rgba(15, 23, 42, 0.02);
+    }
+    .inbox-row:hover {
+        border-color: #cbd5e1;
+        box-shadow: 0 4px 10px rgba(15, 23, 42, 0.04);
+    }
+
+    /* AI Analysis Card */
     .email-card {
         background: #ffffff;
         border: 1.5px solid #e2e8f0;
@@ -66,10 +82,6 @@ st.markdown("""
         padding: 20px 24px;
         margin-bottom: 14px;
         box-shadow: 0 2px 4px rgba(15, 23, 42, 0.02);
-        transition: border-color 0.15s ease;
-    }
-    .email-card:hover {
-        border-color: #94a3b8;
     }
 
     .badge {
@@ -113,35 +125,25 @@ SCOPES = [
     'https://www.googleapis.com/auth/calendar.events'
 ]
 
-# Uses cloud APP_URL if present, defaults to localhost for dev
 REDIRECT_URI = st.secrets.get("APP_URL", "http://localhost:8501")
 
 def get_oauth_flow():
-    """Builds the OAuth flow correctly for local or Streamlit Cloud environments."""
     if "google_oauth" in st.secrets:
         raw_config = st.secrets["google_oauth"]
-        # Ensure the dict has the {"web": {...}} wrapper Google expects
         if "web" in raw_config:
             client_config = {"web": dict(raw_config["web"])}
         else:
             client_config = {"web": dict(raw_config)}
-            
-        return Flow.from_client_config(
-            client_config, 
-            scopes=SCOPES, 
-            redirect_uri=REDIRECT_URI
-        )
+        return Flow.from_client_config(client_config, scopes=SCOPES, redirect_uri=REDIRECT_URI)
     elif CLIENT_SECRETS_FILE.exists():
-        return Flow.from_client_secrets_file(
-            str(CLIENT_SECRETS_FILE), 
-            scopes=SCOPES, 
-            redirect_uri=REDIRECT_URI
-        )
+        return Flow.from_client_secrets_file(str(CLIENT_SECRETS_FILE), scopes=SCOPES, redirect_uri=REDIRECT_URI)
     else:
         st.error("Missing Google OAuth credentials.")
         st.stop()
 
-# Session State
+# Session State Initialization
+if "raw_inbox" not in st.session_state:
+    st.session_state.raw_inbox = []
 if "scan_results" not in st.session_state:
     st.session_state.scan_results = []
 if "synced_events" not in st.session_state:
@@ -167,6 +169,7 @@ def logout_user():
     if os.path.exists(TOKEN_FILE):
         os.remove(TOKEN_FILE)
     st.session_state.credentials = None
+    st.session_state.raw_inbox = []
     st.session_state.scan_results = []
     st.session_state.synced_events = set()
     st.rerun()
@@ -175,10 +178,15 @@ def logout_user():
 query_params = st.query_params
 if "code" in query_params and not st.session_state.credentials:
     code = query_params["code"]
-    try:
-        with open("verifier.txt", "r") as vf:
-            saved_verifier = vf.read().strip()
-    except FileNotFoundError:
+    saved_verifier = st.session_state.get("code_verifier")
+    if not saved_verifier and os.path.exists("verifier.txt"):
+        try:
+            with open("verifier.txt", "r") as vf:
+                saved_verifier = vf.read().strip()
+        except Exception:
+            pass
+
+    if not saved_verifier:
         st.error("Authentication expired. Please restart.")
         st.stop()
 
@@ -190,31 +198,29 @@ if "code" in query_params and not st.session_state.credentials:
         with open(TOKEN_FILE, 'w') as tf:
             tf.write(creds.to_json())
     except Exception:
-        pass  # Graceful fallback on read-only cloud filesystems
+        pass
 
     st.session_state.credentials = creds
     st.query_params.clear()
     st.rerun()
 
-def fetch_recent_emails(gmail_service, max_results=8):
-    # REMOVE q='newer_than:7d' so it simply fetches the last N messages regardless of date
+def fetch_recent_emails(gmail_service, max_results=15):
+    """Fetches messages directly from Gmail API without filtering dates."""
     results = gmail_service.users().messages().list(
-        userId='me', 
+        userId='me',
         maxResults=max_results
     ).execute()
     messages = results.get('messages', [])
     fetched = []
     for msg in messages:
-        full = gmail_service.users().messages().get(
-            userId='me', id=msg['id'], format='full'
-        ).execute()
+        full = gmail_service.users().messages().get(userId='me', id=msg['id'], format='full').execute()
         snippet = full.get('snippet', '')
-        payload = full.get('payload', {})
-        headers = {h['name']: h['value'] for h in payload.get('headers', [])}
+        headers = {h['name']: h['value'] for h in full.get('payload', {}).get('headers', [])}
         fetched.append({
             'id': msg['id'],
-            'subject': headers.get('Subject', 'No Subject'),
+            'subject': headers.get('Subject', '(No Subject)'),
             'sender': headers.get('From', 'Unknown Sender'),
+            'date': headers.get('Date', ''),
             'snippet': snippet
         })
     return fetched
@@ -236,16 +242,20 @@ if not st.session_state.credentials:
 
         flow = get_oauth_flow()
         auth_url, _ = flow.authorization_url(prompt='consent', access_type='offline')
-        with open("verifier.txt", "w") as vf:
-            vf.write(flow.code_verifier)
+        st.session_state["code_verifier"] = flow.code_verifier
+        try:
+            with open("verifier.txt", "w") as vf:
+                vf.write(flow.code_verifier)
+        except Exception:
+            pass
 
         st.link_button("Sign in with Google Workspace →", auth_url, type="primary", use_container_width=True)
     st.stop()
 
 # -----------------------------------------------------------------------------
-# 4. Top Navigation Bar
+# 4. Top Navigation Bar (Three Distinct Tabs)
 # -----------------------------------------------------------------------------
-header_left, header_mid, header_right = st.columns([3, 4, 1.5], vertical_alignment="center")
+header_left, header_mid, header_right = st.columns([2.5, 5, 1.5], vertical_alignment="center")
 
 with header_left:
     st.markdown('<div class="brand-logo"><span style="color:#2563eb;">⚡</span> InboxPilot</div>', unsafe_allow_html=True)
@@ -253,7 +263,7 @@ with header_left:
 with header_mid:
     nav_selection = st.radio(
         "Navigation",
-        ["📥 Inbox Triage", "📊 Analytics Dashboard"],
+        ["📬 Inbox", "⚡ AI Triage", "📊 Analytics"],
         horizontal=True,
         label_visibility="collapsed"
     )
@@ -262,29 +272,67 @@ with header_right:
     if st.button("Log out", type="secondary", use_container_width=True):
         logout_user()
 
-st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
+st.markdown("<div style='height: 10px;'></div>", unsafe_allow_html=True)
 
 # -----------------------------------------------------------------------------
 # 5. Routing Views
 # -----------------------------------------------------------------------------
 
-# --- VIEW: INBOX TRIAGE ---
-if nav_selection == "📥 Inbox Triage":
+# --- VIEW 1: REGULAR RAW INBOX (NO GROQ / NO TOKEN USAGE) ---
+if nav_selection == "📬 Inbox":
+    inbox_col1, inbox_col2 = st.columns([4, 1.2], vertical_alignment="center")
+    with inbox_col1:
+        st.markdown("#### Primary Inbox")
+        st.caption("Direct Gmail synchronization. Review incoming messages before running AI triage.")
+    with inbox_col2:
+        fetch_limit = st.selectbox("Messages to fetch", [10, 15, 25, 30], index=1)
+        if st.button("🔄 Refresh Inbox", type="primary", use_container_width=True):
+            with st.spinner("Fetching latest messages from Gmail..."):
+                gmail = build('gmail', 'v1', credentials=st.session_state.credentials)
+                st.session_state.raw_inbox = fetch_recent_emails(gmail, max_results=fetch_limit)
+            st.rerun()
+
+    # Initial auto-load if list is empty
+    if not st.session_state.raw_inbox:
+        with st.spinner("Connecting to Gmail..."):
+            gmail = build('gmail', 'v1', credentials=st.session_state.credentials)
+            st.session_state.raw_inbox = fetch_recent_emails(gmail, max_results=fetch_limit)
+        st.rerun()
+
+    st.markdown("<div style='height: 12px;'></div>", unsafe_allow_html=True)
+
+    # Render Regular Email List
+    for msg in st.session_state.raw_inbox:
+        sender_clean = msg["sender"].replace("<", "&lt;").replace(">", "&gt;")
+        st.markdown(f"""
+        <div class="inbox-row">
+            <div style="display:flex; justify-content:space-between; align-items:baseline; margin-bottom:4px;">
+                <span style="font-weight:700; color:#0f172a; font-size:1.02rem;">{msg['subject']}</span>
+                <span style="font-size:0.78rem; color:#94a3b8; font-weight:600;">{msg['date'][:16]}</span>
+            </div>
+            <div style="font-size:0.82rem; font-weight:600; color:#2563eb; margin-bottom:8px;">{sender_clean}</div>
+            <div style="font-size:0.88rem; color:#475569; line-height:1.45;">{msg['snippet']}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+
+# --- VIEW 2: AI TRIAGE (USES GROQ) ---
+elif nav_selection == "⚡ AI Triage":
     with st.container():
         cfg_c1, cfg_c2 = st.columns([3.5, 1])
         with cfg_c1:
             interests_input = st.text_input(
                 "Filter Targets",
-                value="Hackathons, Tech Talks, AI Meetups, Dev Conferences",
+                value="Hackathons, Tech Talks, AI Meetups, Dev Conferences, Seminars",
                 placeholder="Topics separated by comma..."
             )
             interest_list = [t.strip() for t in interests_input.split(",") if t.strip()]
         with cfg_c2:
-            email_limit = st.selectbox("Scan Depth", [5, 8, 12, 16], index=1)
+            triage_limit = st.selectbox("Scan Depth", [5, 8, 12, 16], index=1)
 
     scan_col1, scan_col2 = st.columns([3, 1.2])
     with scan_col1:
-        scan_btn = st.button("⚡ Scan Inbox & Extract Events", type="primary", use_container_width=True)
+        scan_btn = st.button("⚡ Run AI Analysis on Inbox", type="primary", use_container_width=True)
     with scan_col2:
         pending_events = [
             item for item in st.session_state.scan_results
@@ -305,19 +353,20 @@ if nav_selection == "📥 Inbox Triage":
                 st.rerun()
 
     if scan_btn:
-        with st.status("Extracting emails & running Groq parsing...", expanded=True) as status_box:
+        with st.status("Executing AI scan...", expanded=True) as status_box:
             gmail = build('gmail', 'v1', credentials=st.session_state.credentials)
-            raw = fetch_recent_emails(gmail, max_results=email_limit)
+            raw = fetch_recent_emails(gmail, max_results=triage_limit)
+            st.session_state.raw_inbox = raw
 
-            st.write("Extracting structured event telemetry...")
+            st.write("Evaluating emails with Groq...")
             analyses = analyze_emails_batch(raw, interest_list)
 
             analysis_map = {a.id: a for a in analyses}
             processed = []
             for item in raw:
                 an = analysis_map.get(item["id"])
-                # If Groq didn't parse it or marked it not relevant, still show it for debugging!
-                if an:
+                # Show matches, or all emails parsed if debug needed
+                if an and an.is_relevant:
                     processed.append({
                         "id": item["id"],
                         "subject": item["subject"],
@@ -326,12 +375,12 @@ if nav_selection == "📥 Inbox Triage":
                     })
 
             st.session_state.scan_results = processed
-            status_box.update(label=f"Done — Extracted {len(processed)} relevant threads", state="complete", expanded=False)
+            status_box.update(label=f"Done — Identified {len(processed)} relevant threads", state="complete", expanded=False)
             st.rerun()
 
-    # Results Feed
+    # Triage Results Feed
     if st.session_state.scan_results:
-        st.markdown(f"<div style='font-size:0.85rem; font-weight:700; color:#475569; margin: 20px 0 10px 0;'>IDENTIFIED THREADS ({len(st.session_state.scan_results)})</div>", unsafe_allow_html=True)
+        st.markdown(f"<div style='font-size:0.85rem; font-weight:700; color:#475569; margin: 20px 0 10px 0;'>FILTERED THREADS ({len(st.session_state.scan_results)})</div>", unsafe_allow_html=True)
 
         for item in st.session_state.scan_results:
             email_id = item["id"]
@@ -374,7 +423,7 @@ if nav_selection == "📥 Inbox Triage":
                     if email_id in st.session_state.synced_events:
                         st.button("✓ Added to Calendar", key=f"synced_{email_id}", disabled=True)
                     else:
-                        if st.button("📅 Add to Google Calendar", key=f"add_{email_id}", type="primary"):
+                        if st.button("📅 Add to Calendar", key=f"add_{email_id}", type="primary"):
                             try:
                                 cal = build('calendar', 'v3', credentials=st.session_state.credentials)
                                 link = add_to_calendar(cal, an)
@@ -384,26 +433,30 @@ if nav_selection == "📥 Inbox Triage":
                             except Exception as e:
                                 st.error(f"Calendar Sync Error: {e}")
     else:
-        st.info("No active triage feed. Hit the button above to run a scan.")
+        st.info("No AI-triaged threads yet. Configure your topics and click **⚡ Run AI Analysis on Inbox** above.")
 
-# --- VIEW: ANALYTICS DASHBOARD ---
-elif nav_selection == "📊 Analytics Dashboard":
+
+# --- VIEW 3: ANALYTICS DASHBOARD ---
+elif nav_selection == "📊 Analytics":
     st.markdown("#### Operational Overview")
 
+    total_raw = len(st.session_state.raw_inbox)
     total_matched = len(st.session_state.scan_results)
     total_events = sum(1 for x in st.session_state.scan_results if x["analysis"].is_calendar_event)
     total_synced = len(st.session_state.synced_events)
 
-    m1, m2, m3 = st.columns(3)
+    m1, m2, m3, m4 = st.columns(4)
     with m1:
-        st.markdown(f'<div class="stat-card"><div class="stat-label">Matched Threads</div><div class="stat-value">{total_matched}</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="stat-card"><div class="stat-label">Raw Inbox Count</div><div class="stat-value">{total_raw}</div></div>', unsafe_allow_html=True)
     with m2:
-        st.markdown(f'<div class="stat-card"><div class="stat-label">Detected Events</div><div class="stat-value">{total_events}</div></div>', unsafe_allow_html=True)
+        st.markdown(f'<div class="stat-card"><div class="stat-label">AI Matches</div><div class="stat-value">{total_matched}</div></div>', unsafe_allow_html=True)
     with m3:
+        st.markdown(f'<div class="stat-card"><div class="stat-label">Detected Events</div><div class="stat-value">{total_events}</div></div>', unsafe_allow_html=True)
+    with m4:
         st.markdown(f'<div class="stat-card"><div class="stat-label">Calendar Syncs</div><div class="stat-value">{total_synced}</div></div>', unsafe_allow_html=True)
 
     st.markdown("<div style='height: 24px;'></div>", unsafe_allow_html=True)
-    st.markdown("#### Calendar Sync Log")
+    st.markdown("#### Calendar Sync History")
 
     if not st.session_state.synced_events:
         st.caption("No events added to Google Calendar in this session.")
