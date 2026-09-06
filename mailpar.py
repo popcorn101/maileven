@@ -197,13 +197,20 @@ if "code" in query_params and not st.session_state.credentials:
     st.rerun()
 
 def fetch_recent_emails(gmail_service, max_results=8):
-    results = gmail_service.users().messages().list(userId='me', q='newer_than:7d', maxResults=max_results).execute()
+    # REMOVE q='newer_than:7d' so it simply fetches the last N messages regardless of date
+    results = gmail_service.users().messages().list(
+        userId='me', 
+        maxResults=max_results
+    ).execute()
     messages = results.get('messages', [])
     fetched = []
     for msg in messages:
-        full = gmail_service.users().messages().get(userId='me', id=msg['id'], format='full').execute()
+        full = gmail_service.users().messages().get(
+            userId='me', id=msg['id'], format='full'
+        ).execute()
         snippet = full.get('snippet', '')
-        headers = {h['name']: h['value'] for h in full.get('payload', {}).get('headers', [])}
+        payload = full.get('payload', {})
+        headers = {h['name']: h['value'] for h in payload.get('headers', [])}
         fetched.append({
             'id': msg['id'],
             'subject': headers.get('Subject', 'No Subject'),
